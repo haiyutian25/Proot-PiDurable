@@ -16,32 +16,44 @@ import java.io.File
 object ProotBinds {
 
     /**
-     * 共享存储：`/sdcard`、`/mnt/sdcard`、`/storage` 等。
+     * 共享存储：`/sdcard`、`/mnt/sdcard`、`/storage`。
      *
-     * 对齐 `bindings.py::storage_bindings()`。仅在 app 已获得存储权限
-     * （`/storage` 可读）时才会产出绑定，否则返回空列表 —— 没权限时强行绑定
-     * 会让 guest 内看到一个不可读的 `/sdcard`，反而误导。
+     * 对齐 `bindings.py::storage_bindings()`，但**不按权限决定是否绑定**，
+     * 原因是权限模型分两层，绑定解决不了第二层：
+     *
+     *  · **路径层（绑定能解决）**：`/storage` 是 `drwxr-xr-x`，`/storage/emulated/0`
+     *    对 other 位是 `--x` —— 也就是说**任何 app 都能 `cd` 穿进去**，无需授权。
+     *  · **数据层（绑定解决不了）**：能否 `ls` 出目录、能否读写文件，由 sdcardfs 的
+     *    `derive_gid`/`multiuser` 在**访问时**判定 —— 有 `READ_EXTERNAL_STORAGE` 的
+     *    app 被派生为 `sdcard_rw`(1015) 组而获得完整权限，没有的则受限。
+     *
+     * 所以这里一律绑定，让 guest 内**至少路径是齐的**（`/sdcard`、`/mnt/sdcard`、
+     * `/storage/emulated/0` 三个别名行为一致）；能否真正读到内容交给内核判定，
+     * 未授权时 `ls` 会报 Permission denied 而 `cd` 可用。
+     * 原先"未授权就不绑 `/sdcard`"会让三个别名互相矛盾，反而更难理解。
      */
     fun storage(): List<String> {
         val bind = mutableListOf<String>()
         val storage = File("/storage")
-        if (storage.canRead()) {
+
+        if (storage.isDirectory) {
             bind += "--bind=/storage"
             val emulated0 = File("/storage/emulated/0")
-            if (emulated0.canRead()) {
+            if (emulated0.isDirectory) {
                 bind += "--bind=/storage/emulated/0:/sdcard"
                 bind += "--bind=/storage/emulated/0:/mnt/sdcard"
             }
-        } else {
-            // 退路：逐项尝试常见别名，命中一个即可
-            for (path in listOf("/storage/self/primary", "/storage/emulated/0", "/sdcard")) {
-                if (!File(path).canRead()) continue
-                bind += "--bind=$path:/mnt/sdcard"
-                bind += "--bind=$path:/sdcard"
-                bind += "--bind=$path:/storage/emulated/0"
-                bind += "--bind=$path:/storage/self/primary"
-                break
-            }
+            return bind
+        }
+
+        // 退路：个别 ROM 没有 /storage，逐个试常见别名，命中一个即可
+        for (path in listOf("/storage/self/primary", "/storage/emulated/0", "/sdcard")) {
+            if (!File(path).isDirectory) continue
+            bind += "--bind=$path:/mnt/sdcard"
+            bind += "--bind=$path:/sdcard"
+            bind += "--bind=$path:/storage/emulated/0"
+            bind += "--bind=$path:/storage/self/primary"
+            break
         }
         return bind
     }
