@@ -27,15 +27,15 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lhzkml.spike.SpikeApplication
-import com.lhzkml.spike.di.AppContainer
-import com.lhzkml.spike.presentation.diagnostics.DiagnosticsIntent
-import com.lhzkml.spike.presentation.diagnostics.DiagnosticsScreen
-import com.lhzkml.spike.presentation.diagnostics.DiagnosticsViewModel
-import com.lhzkml.spike.presentation.runtime.RuntimeIntent
-import com.lhzkml.spike.presentation.runtime.RuntimeScreen
-import com.lhzkml.spike.presentation.runtime.RuntimeViewModel
-import com.lhzkml.spike.presentation.terminal.TerminalScreen
-import com.lhzkml.spike.presentation.terminal.TerminalViewModel
+import com.lhzkml.spike.core.data.di.AppContainer
+import com.lhzkml.spike.feature.diagnostics.impl.DiagnosticsIntent
+import com.lhzkml.spike.feature.diagnostics.impl.DiagnosticsScreen
+import com.lhzkml.spike.feature.diagnostics.impl.DiagnosticsViewModel
+import com.lhzkml.spike.feature.runtime.impl.RuntimeIntent
+import com.lhzkml.spike.feature.runtime.impl.RuntimeScreen
+import com.lhzkml.spike.feature.runtime.impl.RuntimeViewModel
+import com.lhzkml.spike.feature.terminal.impl.TerminalScreen
+import com.lhzkml.spike.feature.terminal.impl.TerminalViewModel
 
 /**
  * 应用入口。Compose 负责渲染，逻辑全部在 ViewModel。

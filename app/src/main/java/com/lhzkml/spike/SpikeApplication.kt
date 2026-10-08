@@ -3,7 +3,7 @@ package com.lhzkml.spike
 import android.app.Application
 import android.os.SystemClock
 import android.util.Log
-import com.lhzkml.spike.di.AppContainer
+import com.lhzkml.spike.core.data.di.AppContainer
 
 /**
  * 应用入口：持有依赖容器（手工 DI）。

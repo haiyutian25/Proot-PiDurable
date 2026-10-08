@@ -10,7 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.lhzkml.spike.SpikeApplication
-import com.lhzkml.spike.di.AppContainer
+import com.lhzkml.spike.core.data.di.AppContainer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

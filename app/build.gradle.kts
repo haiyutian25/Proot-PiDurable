@@ -1,7 +1,12 @@
+// app —— 应用壳。
+//
+// 这里只保留「装配」职责：Application、宿主 Activity、前台服务、以及把各 feature
+// 的实现模块聚合成一个 APK。业务逻辑一律下沉到 feature:impl 与 core:*。
+//
+// 原生库与 CMake 已随 core:data / core:terminal 走，本模块不再声明 externalNativeBuild。
 plugins {
-    id("com.android.application")
-    // Compose 编译器随 Kotlin 版本管理（AGP 9 内置 Kotlin，仍需显式声明此插件）
-    id("org.jetbrains.kotlin.plugin.compose")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
@@ -38,34 +43,34 @@ android {
 
     packaging {
         jniLibs {
-            // proot 必须从 nativeLibraryDir 以可执行形式释放
+            // 关键：proot 必须从 nativeLibraryDir 以未压缩形式释放，否则无法 exec。
+            // 各模块的 jniLibs 最终都汇入同一个 APK，此处统一约束即可。
             useLegacyPackaging = true
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            // 终端用的原生 PTY 桥（移植自 Noxs）
-            path = file("src/main/cpp/CMakeLists.txt")
         }
     }
 }
 
 dependencies {
-    // Compose（用 BOM 统一版本）
-    implementation(platform("androidx.compose:compose-bom:2026.08.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.activity:activity-compose:1.11.0")
-    implementation("androidx.navigation:navigation-compose:2.9.5")
+    // 功能层（impl 会间接带入各自的 api）
+    implementation(project(":feature:runtime:impl"))
+    implementation(project(":feature:terminal:impl"))
+    implementation(project(":feature:diagnostics:impl"))
 
-    // 生命周期 / ViewModel
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
+    // 核心层
+    implementation(project(":core:domain"))
+    implementation(project(":core:data"))
+    implementation(project(":core:ui"))
+    implementation(project(":core:terminal"))
+    implementation(project(":core:common"))
 
-    implementation("androidx.core:core-ktx:1.17.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.compose.material3)
+    implementation(libs.activity.compose)
+    implementation(libs.core.ktx)
+    implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.lifecycle.runtime.ktx)
+    implementation(libs.kotlinx.coroutines.android)
 }
