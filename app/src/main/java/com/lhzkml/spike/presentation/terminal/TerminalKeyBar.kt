@@ -3,14 +3,15 @@ package com.lhzkml.spike.presentation.terminal
 import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -20,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -33,7 +35,13 @@ import androidx.compose.ui.unit.sp
  *  1. 设备输入法（讯飞）会把 `/ - . ~ |` 改写成中文标点 —— 打 `/` 得到 `、`，
  *     路径与选项根本敲不出来；
  *  2. 输入法切到数字/符号布局后**没有空格键**，`ls /` 会被打成 `ls/`。
- * 因此符号与空格必须由按键栏兜住：第三行符号、第四行空格 + shell 常用字符。
+ * 因此符号与空格也必须由按键栏兜住。
+ *
+ * **布局：单行横向滚动**。原先排成四行，占用纵向空间过多（软键盘弹出时尤其明显）。
+ * 现在所有键排成一行、放不下就左右滑动 —— 这样只剩一行高度，且能容纳更多键。
+ *
+ * 实现要点：`horizontalScroll` 给子项的是**无限宽度约束**，所以键宽不能用
+ * `weight`（weight 在有界宽度下才有意义），必须给固定/最小宽度。
  *
  * Ctrl / Alt 是"锁定"语义：按下后下一次按键会带上修饰符，随后自动解锁。
  * 锁定时高亮显示 —— 状态由 TerminalViewModel 持有（单一来源），
@@ -51,69 +59,65 @@ fun TerminalKeyBar(
     onToggleAlt: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .background(KeyBarBackground)
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 4.dp, vertical = 3.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        // 第一行：退出 / 执行 / 补全 / 中断 / 行首尾 / 上翻
-        Row(modifier = Modifier.fillMaxWidth()) {
-            KeyButton(label = "ESC") { onByte(byteArrayOf(0x1b)) }
-            KeyButton(label = "⏎") { onSpecial(KeyEvent.KEYCODE_ENTER) }
-            KeyButton(label = "⇥") { onSpecial(KeyEvent.KEYCODE_TAB) }
-            KeyButton(label = "^C", danger = true) { onByte(byteArrayOf(0x03)) }
-            KeyButton(label = "HOME") { onSpecial(KeyEvent.KEYCODE_MOVE_HOME) }
-            KeyButton(label = "END") { onSpecial(KeyEvent.KEYCODE_MOVE_END) }
-            KeyButton(label = "PGUP") { onSpecial(KeyEvent.KEYCODE_PAGE_UP) }
-        }
-
-        // 第二行：修饰键（锁定）+ 方向键 + 下翻
-        Row(modifier = Modifier.fillMaxWidth()) {
-            KeyButton(label = "CTRL", latched = ctrlLatched, onClick = onToggleCtrl)
-            KeyButton(label = "ALT", latched = altLatched, onClick = onToggleAlt)
-            KeyButton(label = "←") { onSpecial(KeyEvent.KEYCODE_DPAD_LEFT) }
-            KeyButton(label = "↑") { onSpecial(KeyEvent.KEYCODE_DPAD_UP) }
-            KeyButton(label = "↓") { onSpecial(KeyEvent.KEYCODE_DPAD_DOWN) }
-            KeyButton(label = "→") { onSpecial(KeyEvent.KEYCODE_DPAD_RIGHT) }
-            KeyButton(label = "PGDN") { onSpecial(KeyEvent.KEYCODE_PAGE_DOWN) }
-        }
-
-        // 第三行：常用符号。
-        // 手机自带输入法会把 / - . ~ | 之类替换成中文标点（实测输入 / 得到 、），
-        // 导致路径与选项根本敲不出来，所以这些符号必须在按键栏里能直接发。
-        Row(modifier = Modifier.fillMaxWidth()) {
-            KeyButton(label = "/") { onByte("/".toByteArray()) }
-            KeyButton(label = "-") { onByte("-".toByteArray()) }
-            KeyButton(label = ".") { onByte(".".toByteArray()) }
-            KeyButton(label = "~") { onByte("~".toByteArray()) }
-            KeyButton(label = "|") { onByte("|".toByteArray()) }
-            KeyButton(label = "_") { onByte("_".toByteArray()) }
-            KeyButton(label = "*") { onByte("*".toByteArray()) }
-        }
-
-        // 第四行：空格 + shell 常用字符。
-        // 空格是终端里最高频的字符，而输入法切到数字/符号布局后没有空格键
-        // （实测把 `ls /` 打成了 `ls/`），所以这里给空格两格宽度兜底。
-        Row(modifier = Modifier.fillMaxWidth()) {
-            KeyButton(label = "空格", weight = 2f) { onByte(" ".toByteArray()) }
-            KeyButton(label = "=") { onByte("=".toByteArray()) }
-            KeyButton(label = "$") { onByte("$".toByteArray()) }
-            KeyButton(label = "\"") { onByte("\"".toByteArray()) }
-            KeyButton(label = "'") { onByte("'".toByteArray()) }
-            KeyButton(label = "?") { onByte("?".toByteArray()) }
-        }
+        // 顺序刻意排成「常用在前」—— 单行放不下，靠左的键最先露出来。
+        // 1) 空格（终端最高频，必须最先可见）
+        KeyButton(label = "空格", minWidth = 72.dp) { onByte(" ".toByteArray()) }
+        // 2) 执行 / 退出 / 补全 / 中断
+        KeyButton(label = "⏎") { onSpecial(KeyEvent.KEYCODE_ENTER) }
+        KeyButton(label = "ESC") { onByte(byteArrayOf(0x1b)) }
+        KeyButton(label = "⇥") { onSpecial(KeyEvent.KEYCODE_TAB) }
+        KeyButton(label = "^C", danger = true) { onByte(byteArrayOf(0x03)) }
+        // 3) 路径与选项必需的符号
+        KeyButton(label = "/") { onByte("/".toByteArray()) }
+        KeyButton(label = "-") { onByte("-".toByteArray()) }
+        KeyButton(label = ".") { onByte(".".toByteArray()) }
+        KeyButton(label = "~") { onByte("~".toByteArray()) }
+        KeyButton(label = "_") { onByte("_".toByteArray()) }
+        KeyButton(label = "|") { onByte("|".toByteArray()) }
+        KeyButton(label = "*") { onByte("*".toByteArray()) }
+        // 4) shell 常用字符
+        KeyButton(label = "=") { onByte("=".toByteArray()) }
+        KeyButton(label = "$") { onByte("$".toByteArray()) }
+        KeyButton(label = "\"") { onByte("\"".toByteArray()) }
+        KeyButton(label = "'") { onByte("'".toByteArray()) }
+        KeyButton(label = "?") { onByte("?".toByteArray()) }
+        // 5) 修饰键（锁定态）
+        KeyButton(label = "CTRL", latched = ctrlLatched, onClick = onToggleCtrl)
+        KeyButton(label = "ALT", latched = altLatched, onClick = onToggleAlt)
+        // 6) 方向键
+        KeyButton(label = "←") { onSpecial(KeyEvent.KEYCODE_DPAD_LEFT) }
+        KeyButton(label = "↑") { onSpecial(KeyEvent.KEYCODE_DPAD_UP) }
+        KeyButton(label = "↓") { onSpecial(KeyEvent.KEYCODE_DPAD_DOWN) }
+        KeyButton(label = "→") { onSpecial(KeyEvent.KEYCODE_DPAD_RIGHT) }
+        // 7) 行首尾与翻页
+        KeyButton(label = "HOME") { onSpecial(KeyEvent.KEYCODE_MOVE_HOME) }
+        KeyButton(label = "END") { onSpecial(KeyEvent.KEYCODE_MOVE_END) }
+        KeyButton(label = "PGUP") { onSpecial(KeyEvent.KEYCODE_PAGE_UP) }
+        KeyButton(label = "PGDN") { onSpecial(KeyEvent.KEYCODE_PAGE_DOWN) }
     }
 }
 
+/**
+ * 单个按键。
+ *
+ * 宽度用 [minWidth] 而不是 `weight` —— 本栏处在 `horizontalScroll` 内，
+ * 子项拿到的是无限宽度约束，weight 无效。
+ */
 @Composable
-private fun RowScope.KeyButton(
+private fun KeyButton(
     label: String,
     latched: Boolean = false,
     danger: Boolean = false,
-    /** 占几格宽（同一行的 weight 之和决定分配比例） */
-    weight: Float = 1f,
+    minWidth: Dp = 56.dp,
     onClick: () -> Unit,
 ) {
     val container = when {
@@ -129,9 +133,9 @@ private fun RowScope.KeyButton(
 
     Box(
         modifier = Modifier
-            .weight(weight)
+            .widthIn(min = minWidth)
             .height(40.dp)
-            .padding(horizontal = 2.dp)
+            .padding(horizontal = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(container)
             .clickable(onClick = onClick),
