@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Runtime 数据不参与备份：rootfs 体积大且可从网络重建 -->
+<full-backup-content>
+    <exclude domain="file" path="runtime" />
+</full-backup-content>

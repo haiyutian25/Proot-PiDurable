@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose 宿主主题；Compose 内部自行管理配色 -->
+    <style name="Theme.Spike" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#FF1B1B1F</item>
+        <item name="android:navigationBarColor">#FF1B1B1F</item>
+    </style>
+</resources>
