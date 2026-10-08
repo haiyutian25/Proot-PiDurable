@@ -101,7 +101,26 @@ class ProotManager(
             "TMPDIR" to "/tmp",
             "HOME" to "/root",
             "TERM" to "xterm-256color",
-            "LANG" to "C.UTF-8",
+            // 必须是 en_US.UTF-8，**不能用 C.UTF-8**。
+            //
+            // Ubuntu 26.04 的 coreutils 换成了 uutils（Rust 实现），它的 ls **只做
+            // locale 名字匹配**，且不认 `C.UTF-8` / `C.utf8` —— 于是把非 ASCII 文件名
+            // 按八进制转义输出（形如 `'$'\344\270\255...'`）。真机对照（必须输出到
+            // tty 才暴露，管道下不转义，这就是早期脚本测不出来的原因）：
+            //
+            //   LANG=C.UTF-8      → 转义 ✗
+            //   LANG=en_US.UTF-8  → 正常 ✓（glibc 2.43 对未生成的 locale 不报警告）
+            //
+            // 注意 Ubuntu Base 根本没生成 en_US.UTF-8（locale -a 只有 C / C.utf8 /
+            // POSIX），uutils 也不校验它是否存在，做名字匹配即可。
+            //
+            // 已确认 /etc/profile.d/01-locale-fix.sh 不会覆盖这里传入的值
+            // （它的 eval $(locale-check C.UTF-8) 在本版 glibc 下不输出内容），
+            // 所以传什么、登录 shell 里就是什么，无需改动 rootfs。
+            //
+            // Alpine 用 musl + busybox ls，不做这种转义，同样不受影响。
+            "LANG" to "en_US.UTF-8",
+            "LC_ALL" to "en_US.UTF-8",
             // 让 256 色终端也能被程序识别为真彩色
             "COLORTERM" to "truecolor",
             // Ubuntu/Debian 的 /root/.bashrc 只在 TERM=xterm-color 时自动启用彩色提示符，
