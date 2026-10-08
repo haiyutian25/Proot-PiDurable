@@ -40,7 +40,21 @@ import java.util.concurrent.TimeUnit
  * proot 与依赖库（libtalloc.so / libandroid-shmem.so）以 jniLibs 形式随 APK 发布，
  * 由系统释放在 nativeLibraryDir —— 这是 Android 允许 app 执行二进制的唯一位置。
  */
-class ProotManager(private val paths: RuntimePaths) {
+class ProotManager(
+    private val paths: RuntimePaths,
+    /**
+     * 共享存储是否已授权。
+     *
+     * **默认未授权**（安全默认）：未授权时完全不绑定外部存储 —— 不只是不能读写，
+     * 而是 guest 内**看不到也进不去** `/sdcard`、`/storage`、`/mnt/sdcard`。
+     *
+     * 为什么必须这样：宿主上 `/storage/emulated/0` 的权限位是 `drwxrwx--x`，
+     * other 位带 `x`，**任何进程都能 cd 穿越**（实测确认）。也就是说仅靠
+     * 「绑定但期待内核拒绝」是拦不住穿越的 —— 必须在绑定层就摘干净，
+     * 才能让 proot 沙盒在未授权时彻底碰不到外部存储。
+     */
+    private val storageGranted: () -> Boolean = { false },
+) {
 
     /** 进程句柄：用于管理长驻的 guest 进程 */
     interface ProcessHandle {
@@ -50,6 +64,18 @@ class ProotManager(private val paths: RuntimePaths) {
         fun destroy()
         /** 等待退出；返回是否在超时前退出 */
         fun waitFor(timeoutMs: Long): Boolean
+    }
+
+    /**
+     * 启动 guest 前确保沙盒边界干净。
+     *
+     * 未授权时清掉 rootfs 内可能残留的外部存储挂载点 —— proot 创建 bind 目标是持久的，
+     * 所以「先授权、后撤销」会留下空目录（见 [ProotBinds.cleanupStorageStubs]）。
+     * 由调用方在创建会话/执行命令前调用；已授权时是空操作。
+     */
+    fun ensureSandboxIsolation(rootfs: File) {
+        if (storageGranted()) return
+        ProotBinds.cleanupStorageStubs(rootfs)
     }
 
     /** 校验 proot 二进制是否就位（安装前的自检） */
@@ -179,7 +205,9 @@ class ProotManager(private val paths: RuntimePaths) {
         if (options.sysDataStubs) addAll(SysDataStubs.bindArgs(paths.sysdata))
 
         // ---- 7. Android 域路径（对齐 proot-distro 的 non-minimal 绑定集合）----
-        if (options.storage) addAll(ProotBinds.storage())
+        // 共享存储单独把守：未授权时一个都不绑 —— 否则 guest 能 cd 穿越进去
+        // （见 storageGranted 的说明）。这是沙盒边界，不是可选的便利功能。
+        if (options.storage && storageGranted()) addAll(ProotBinds.storage())
         if (options.systemPaths) addAll(ProotBinds.system)
         if (options.dalvikCache) addAll(ProotBinds.dalvikCache)
 

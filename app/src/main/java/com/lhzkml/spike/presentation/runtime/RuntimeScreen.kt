@@ -109,12 +109,12 @@ private fun StorageCard(state: RuntimeUiState, onAfterRequest: () -> Unit) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    // 未授权时路径仍可穿越（sdcardfs 的目录对 other 位是 --x），
-                    // 受限的是列目录与读写 —— 文案要说准，否则会与用户实测矛盾。
+                    // 未授权时**不绑定**外部存储：guest 内连 /sdcard、/storage 这些
+                    // 路径都不存在，不只是不能读写。沙盒边界要在文案里说清。
                     text = if (state.storageGranted) {
                         "已授权 —— 可读写 /sdcard（照片、下载等）"
                     } else {
-                        "未授权 —— 路径可进入，但无法列出或读写文件"
+                        "未授权 —— 已隔绝外部存储，guest 内无 /sdcard"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (state.storageGranted) StorageGrantedColor else StorageDeniedColor,

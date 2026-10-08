@@ -76,6 +76,9 @@ class RuntimeController(
         }
         listener.onStage(RuntimeStage.PREPARING_ROOTFS, "${distro.displayName} 就绪")
 
+        // 沙盒边界：未授权时清掉外部存储的残留挂载点（proot 创建 bind 目标是持久的）
+        proot.ensureSandboxIsolation(root)
+
         // ---- 启动 PRoot ----
         listener.onStage(RuntimeStage.STARTING_PROOT, "启动 PRoot")
         val probe = proot.execute(

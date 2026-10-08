@@ -16,21 +16,22 @@ import java.io.File
 object ProotBinds {
 
     /**
-     * 共享存储：`/sdcard`、`/mnt/sdcard`、`/storage`。
+     * 共享存储：`/storage`、`/sdcard`、`/mnt/sdcard`。
      *
-     * 对齐 `bindings.py::storage_bindings()`，但**不按权限决定是否绑定**，
-     * 原因是权限模型分两层，绑定解决不了第二层：
+     * 对齐 `bindings.py::storage_bindings()`。
      *
-     *  · **路径层（绑定能解决）**：`/storage` 是 `drwxr-xr-x`，`/storage/emulated/0`
-     *    对 other 位是 `--x` —— 也就是说**任何 app 都能 `cd` 穿进去**，无需授权。
-     *  · **数据层（绑定解决不了）**：能否 `ls` 出目录、能否读写文件，由 sdcardfs 的
-     *    `derive_gid`/`multiuser` 在**访问时**判定 —— 有 `READ_EXTERNAL_STORAGE` 的
-     *    app 被派生为 `sdcard_rw`(1015) 组而获得完整权限，没有的则受限。
+     * **调用前提：已获得存储授权。** 未授权时 `ProotManager` 根本不会调它 ——
+     * 这是刻意的沙盒边界，不是可省的便利功能：
      *
-     * 所以这里一律绑定，让 guest 内**至少路径是齐的**（`/sdcard`、`/mnt/sdcard`、
-     * `/storage/emulated/0` 三个别名行为一致）；能否真正读到内容交给内核判定，
-     * 未授权时 `ls` 会报 Permission denied 而 `cd` 可用。
-     * 原先"未授权就不绑 `/sdcard`"会让三个别名互相矛盾，反而更难理解。
+     *  · 宿主上 `/storage` 是 `drwxr-xr-x`、`/storage/emulated/0` 对 other 位是 `--x`，
+     *    也就是说**任何进程都能 `cd` 穿越进去**，无需任何授权。
+     *  · 所以「绑上去、等内核拒绝」是拦不住穿越的 —— 未授权时必须一个都不绑，
+     *    guest 内才会连 `/sdcard`、`/storage` 这些路径都不存在。
+     *
+     * 授权之后，能读到的内容由 sdcardfs 的 `derive_gid`/`multiuser` 按进程权限
+     * 动态判定（有权限者派生为 `sdcard_rw`(1015) 组）。
+     *
+     * 三个别名一并指向同一目标，保证 guest 内路径行为一致。
      */
     fun storage(): List<String> {
         val bind = mutableListOf<String>()
@@ -94,6 +95,30 @@ object ProotBinds {
         val dir = File(raw)
         if (dir.isDirectory && dir.canRead() && dir.canExecute()) "--bind=$raw" else null
     }
+
+    /**
+     * 清掉 rootfs 内可能残留的外部存储挂载点。
+     *
+     * 为什么需要：proot 处理 `--bind=src:dst` 时，**若 dst 在 rootfs 内不存在就会创建它**，
+     * 而且创建是写进 rootfs 的、**持久保留**。于是「先授权、后撤销」会留下一批空目录
+     * （实测 `/sdcard`、`/storage`、`/mnt/sdcard` 权限 `d---------`），
+     * 让 guest 以为外部存储还在。虽然里面没有任何内容（`/storage/emulated/0` 确实不存在），
+     * 但沙盒隔绝应当连路径痕迹都不留。
+     *
+     * **只删空目录**：非空说明有真实内容，宁可保留也不能误删。
+     */
+    fun cleanupStorageStubs(rootfs: File) {
+        for (rel in STORAGE_STUBS) {
+            val dir = File(rootfs, rel)
+            if (!dir.isDirectory) continue
+            if (dir.list()?.isEmpty() == true) runCatching { dir.delete() }
+        }
+    }
+
+    private val STORAGE_STUBS = listOf(
+        "sdcard", "storage", "mnt/sdcard", "mnt/runtime",
+        "storage/emulated", "storage/emulated/0", "storage/self",
+    )
 
     private val SYSTEM_PATHS = listOf(
         "/apex", "/odm", "/product", "/system", "/system_ext", "/vendor",

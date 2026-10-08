@@ -53,7 +53,12 @@ class AppContainer(context: Context) {
 
     val logs: LogRepository = InMemoryLogRepository().also { mark("LogRepository") }
 
-    private val prootManager = ProotManager(paths).also { mark("ProotManager") }
+    private val prootManager = ProotManager(
+        paths = paths,
+        // 沙盒边界：未授权时完全不绑定外部存储（guest 内连路径都不存在）。
+        // 用 lambda 而不是快照值 —— 用户可能随时授权，每次构造 argv 都要按当时状态判定。
+        storageGranted = { StorageAccess.hasAccess(appContext) },
+    ).also { mark("ProotManager") }
 
     /**
      * rootfs 安装后的修补（DNS / hosts）。

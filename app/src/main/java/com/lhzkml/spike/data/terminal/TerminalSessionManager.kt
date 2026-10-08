@@ -81,6 +81,10 @@ class TerminalSessionManager(
         check(root.isDirectory) { "${target.displayName} 尚未安装" }
         proot.verify().getOrThrow()
 
+        // 启动前先确保沙盒边界：未授权时清掉可能残留的外部存储挂载点，
+        // 否则 guest 内会看到一个进得去、却什么都没有的 /sdcard。
+        proot.ensureSandboxIsolation(root)
+
         // guest 内工作目录：优先 /root，缺失则退回 /
         val guestCwd = if (File(root, "root").isDirectory) "/root" else "/"
 
