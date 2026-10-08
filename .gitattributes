@@ -1,0 +1,22 @@
+# 换行符策略：保证跨平台一致（覆盖 core.autocrlf）
+* text=auto eol=lf
+
+# Unix shell 脚本必须 LF。
+# 否则在 Windows 上被 core.autocrlf 转成 CRLF 后，Git Bash / WSL 执行
+# ./gradlew 会报 "bad interpreter: /bin/sh^M"。
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows 批处理必须 CRLF
+gradlew.bat text eol=crlf
+*.bat text eol=crlf
+
+# 二进制：禁止任何换行符转换
+*.jar binary
+*.so binary
+*.apk binary
+*.aab binary
+*.png binary
+*.jpg binary
+*.keystore binary
+*.jks binary
