@@ -29,6 +29,15 @@ sealed interface RuntimeIntent {
     /** 刷新状态 */
     data object Refresh : RuntimeIntent
 
+    /**
+     * 重新读取共享存储授权状态。
+     *
+     * 发起授权本身由 UI 层调 [com.lhzkml.spike.data.system.StorageAccess.request] 完成
+     * （它需要 Activity，而 ViewModel 不应持有）；授权返回或从系统设置页回来后
+     * 由 UI 发出本意图，让状态回到唯一来源。
+     */
+    data object RefreshStorage : RuntimeIntent
+
     /** 执行一条自定义命令（诊断用） */
     data class RunCommand(val command: String) : RuntimeIntent
 

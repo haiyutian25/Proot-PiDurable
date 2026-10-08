@@ -1,5 +1,8 @@
 package com.lhzkml.spike.presentation.runtime
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -34,11 +37,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lhzkml.spike.data.system.StorageAccess
 import com.lhzkml.spike.domain.model.Distro
 import com.lhzkml.spike.domain.model.RuntimeStage
 import com.lhzkml.spike.domain.model.RuntimeStatus
@@ -64,6 +69,8 @@ fun RuntimeScreen(
     ) {
         StatusCard(state)
 
+        StorageCard(state) { onIntent(RuntimeIntent.RefreshStorage) }
+
         DistroCard(state, onIntent)
 
         ActionCard(state, onIntent)
@@ -74,6 +81,64 @@ fun RuntimeScreen(
 
         state.error?.let { ErrorCard(it) { onIntent(RuntimeIntent.ClearError) } }
     }
+}
+
+/**
+ * 共享存储授权入口。
+ *
+ * 授权与否直接决定 guest 内能不能看到 `/sdcard`（见 `ProotBinds.storage`），
+ * 所以放进界面而不是藏在设置里。
+ *
+ * 授权动作必须由 UI 发起（需要 Activity），ViewModel 只负责读状态；
+ * 分版本的差异全在 `StorageAccess.request` 里处理。
+ * API ≥ 30 会跳到系统设置页，**不会**有结果回调 —— 因此回调里统一
+ * 让 UI 发一次 RefreshStorage；从设置页返回时由 Activity 的 onResume 再刷一次。
+ */
+@Composable
+private fun StorageCard(state: RuntimeUiState, onAfterRequest: () -> Unit) {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "共享存储",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = if (state.storageGranted) {
+                        "已授权 —— guest 内可直接访问 /sdcard"
+                    } else {
+                        "未授权 —— guest 内看不到 /sdcard"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state.storageGranted) StorageGrantedColor else StorageDeniedColor,
+                )
+            }
+            if (!state.storageGranted) {
+                Button(
+                    onClick = {
+                        val activity = context.findActivity()
+                        if (activity != null) StorageAccess.request(activity, STORAGE_REQUEST_CODE)
+                        onAfterRequest()
+                    },
+                ) { Text("授予") }
+            }
+        }
+    }
+}
+
+/** 从 Compose 的 Context 找到宿主 Activity（`LocalContext` 在 setContent 下就是它） */
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 @Composable
@@ -333,3 +398,15 @@ private fun statusColor(status: RuntimeStatus): Color = when (status) {
     RuntimeStatus.INSTALLING, RuntimeStatus.STARTING, RuntimeStatus.STOPPING -> Color(0xFFFFA726)
     RuntimeStatus.STOPPED -> Color(0xFF78909C)
 }
+
+/** 存储授权状态配色 */
+private val StorageGrantedColor = Color(0xFF4CAF50)
+private val StorageDeniedColor = Color(0xFFFFA726)
+
+/**
+ * 存储授权的 requestCode。
+ *
+ * 只有 API ≤ 29 走 `requestPermissions` 时才会带着它回到
+ * `onRequestPermissionsResult`；更高版本是跳设置页，用不上。
+ */
+internal const val STORAGE_REQUEST_CODE = 0x5701

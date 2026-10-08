@@ -4,11 +4,14 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import com.lhzkml.spike.data.logging.InMemoryLogRepository
+import com.lhzkml.spike.data.runtime.GuestFixup
 import com.lhzkml.spike.data.runtime.ProotManager
 import com.lhzkml.spike.data.runtime.RootFsManager
 import com.lhzkml.spike.data.runtime.RuntimeController
 import com.lhzkml.spike.data.runtime.RuntimePaths
 import com.lhzkml.spike.data.runtime.RuntimeRepositoryImpl
+import com.lhzkml.spike.data.runtime.SysDataStubs
+import com.lhzkml.spike.data.system.StorageAccess
 import com.lhzkml.spike.data.system.SysInfoRepositoryImpl
 import com.lhzkml.spike.data.terminal.TerminalSessionManager
 import com.lhzkml.spike.domain.repository.LogRepository
@@ -52,7 +55,21 @@ class AppContainer(context: Context) {
 
     private val prootManager = ProotManager(paths).also { mark("ProotManager") }
 
-    private val rootFsManager = RootFsManager(paths = paths, logs = logs).also { mark("RootFsManager") }
+    /**
+     * rootfs 安装后的修补（DNS / hosts）。
+     *
+     * Android 宿主没有 `/etc/resolv.conf`，不写这一步 guest 内 apt/apk 解析不了域名。
+     */
+    private val guestFixup = GuestFixup(
+        dns = GuestFixup.AndroidDnsProvider(appContext),
+        logs = logs,
+    ).also { mark("GuestFixup") }
+
+    private val rootFsManager = RootFsManager(
+        paths = paths,
+        logs = logs,
+        fixup = guestFixup,
+    ).also { mark("RootFsManager") }
 
     private val runtimeController = RuntimeController(
         paths = paths,
@@ -90,6 +107,14 @@ class AppContainer(context: Context) {
     val rootFs: RootFsManager get() = rootFsManager
     val controller: RuntimeController get() = runtimeController
 
+    /**
+     * 共享存储是否已授权。
+     *
+     * ViewModel 不持有 Context，所以把这次查询收在这里 ——
+     * 它最终决定 guest 内 `/sdcard` 是否可见（见 [ProotBinds.storage]）。
+     */
+    fun hasStorageAccess(): Boolean = StorageAccess.hasAccess(appContext)
+
     // ---- 用例 ----
 
     val selectDistro = SelectDistroUseCase(runtimeRepository).also { mark("useCases") }
@@ -102,6 +127,12 @@ class AppContainer(context: Context) {
     val executeInRuntime = ExecuteInRuntimeUseCase(runtimeRepository)
 
     init {
+        // 生成伪造的 /proc 条目（供 SysDataStubs 绑定）。失败不阻断启动，
+        // 只是少了几个 stub，guest 内会看到 Android 原生的 /proc 内容。
+        if (!SysDataStubs.materialize(paths.sysdata)) {
+            Log.w(TAG, "sysdata stub 写入失败，guest 将使用宿主原生 /proc")
+        }
+        mark("sysDataStubs")
         mark("AppContainer done")
     }
 }

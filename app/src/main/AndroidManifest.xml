@@ -4,6 +4,25 @@
     <!-- rootfs 下载 -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 读取当前网络的 DNS，用于安装后写入 guest 的 /etc/resolv.conf -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      共享存储（把 /sdcard 绑给 guest）。
+      ProotBinds.storage() 用 canRead() 判断，没授权就返回空，不会给出一个读不了的 /sdcard。
+      本项目不考虑 Play 上架，因此直接申请「所有文件访问」以拿到完整可用的共享存储。
+
+      分版本情况：
+        · API ≤ 28（本机测试机 Android 9）：READ/WRITE_EXTERNAL_STORAGE 运行时授权即可
+        · API 29：requestLegacyExternalStorage 生效
+        · API ≥ 30：需要 MANAGE_EXTERNAL_STORAGE，且必须引导用户去系统设置页开启
+    -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
     <!-- 长时间运行的 Runtime（PRoot / Node / Pi Server）由前台服务承载 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -14,6 +33,7 @@
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.Spike">
 
         <activity

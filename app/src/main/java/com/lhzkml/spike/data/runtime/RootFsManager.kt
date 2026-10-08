@@ -27,6 +27,8 @@ class RootFsManager(
     private val paths: RuntimePaths,
     private val logs: LogRepository,
     private val extractor: TarExtractor = TarExtractor(),
+    /** 安装后的修补（DNS / hosts）。为空则跳过 —— 便于纯离线场景。 */
+    private val fixup: GuestFixup? = null,
 ) {
 
     companion object {
@@ -141,6 +143,17 @@ class RootFsManager(
                 // ---- 4. 兜底修正符号链接 ----
                 val fixed = extractor.fixAbsoluteSymlinks(root)
                 if (fixed > 0) logs.warn(TAG, "修正 $fixed 个绝对符号链接")
+            }
+
+            // ---- 4.5 安装后修补：DNS 与 hosts ----
+            // Android 宿主没有 /etc/resolv.conf（DNS 由 netd 管），guest 内因此解析不了
+            // 域名、apt/apk 装不了包。必须在每次安装后写入 —— 放在解压分支之外，
+            // 这样「已装好但缺 resolv.conf」的老 rootfs 重跑安装也能修好。
+            fixup?.let { fx ->
+                progress.onStage("fixup", "配置 DNS 与 hosts")
+                runCatching { fx.apply(root) }
+                    .onSuccess { s -> logs.info(TAG, "fixup 完成，DNS=$s") }
+                    .onFailure { logs.warn(TAG, "fixup 失败（不影响可用性）：${it.message}") }
             }
 
             // ---- 5. 完整性检查 ----

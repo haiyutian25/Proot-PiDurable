@@ -38,6 +38,14 @@ class RuntimePaths(context: Context) {
     /** guest 内 /dev/shm 的绑定源（Android 没有 /dev/shm，用私有目录顶上） */
     val shm: File = File(runtimeRoot, "shm").apply { mkdirs() }
 
+    /**
+     * 伪造 /proc 条目的存放目录（对应 proot-distro 的 `<runtime>/sysdata`）。
+     *
+     * 与 rootfs 平级而非放在 rootfs 内 —— guest 内的 root 可写 rootfs，
+     * 放在里面等于让 guest 能改自己的假数据。
+     */
+    val sysdata: File get() = File(runtimeRoot, "sysdata")
+
     /** 私有库目录：用于 libtalloc.so.2 别名 */
     val lib: File = File(runtimeRoot, "lib").apply { mkdirs() }
 

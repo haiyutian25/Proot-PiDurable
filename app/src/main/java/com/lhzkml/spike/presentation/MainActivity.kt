@@ -13,11 +13,15 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -27,6 +31,7 @@ import com.lhzkml.spike.di.AppContainer
 import com.lhzkml.spike.presentation.diagnostics.DiagnosticsIntent
 import com.lhzkml.spike.presentation.diagnostics.DiagnosticsScreen
 import com.lhzkml.spike.presentation.diagnostics.DiagnosticsViewModel
+import com.lhzkml.spike.presentation.runtime.RuntimeIntent
 import com.lhzkml.spike.presentation.runtime.RuntimeScreen
 import com.lhzkml.spike.presentation.runtime.RuntimeViewModel
 import com.lhzkml.spike.presentation.terminal.TerminalScreen
@@ -79,6 +84,19 @@ private fun SpikeApp(container: AppContainer) {
     val runtimeViewModel: RuntimeViewModel = viewModel(factory = factory)
     val diagnosticsViewModel: DiagnosticsViewModel = viewModel(factory = factory)
     val terminalViewModel: TerminalViewModel = viewModel(factory = factory)
+
+    // 存储授权在 API ≥ 30 是「跳系统设置页」，没有结果回调 ——
+    // 用户从设置页返回时会走 onResume，所以在这里复查一次，让状态回到单一来源。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, runtimeViewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                runtimeViewModel.onIntent(RuntimeIntent.RefreshStorage)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         bottomBar = {

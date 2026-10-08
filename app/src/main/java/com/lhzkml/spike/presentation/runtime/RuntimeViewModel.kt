@@ -30,6 +30,8 @@ class RuntimeViewModel(private val container: AppContainer) : ViewModel() {
                 _uiState.update { it.merge(state) }
             }
         }
+        // 存储授权状态不属于 Repository 的状态源（它是系统侧事实），单独读一次
+        refreshStorage()
     }
 
     fun onIntent(intent: RuntimeIntent) {
@@ -50,9 +52,14 @@ class RuntimeViewModel(private val container: AppContainer) : ViewModel() {
             RuntimeIntent.Stop -> launchOperation { container.stopRuntime() }
             RuntimeIntent.Restart -> launchOperation { container.restartRuntime() }
             RuntimeIntent.Refresh -> refresh()
+            RuntimeIntent.RefreshStorage -> refreshStorage()
             RuntimeIntent.ClearError -> _uiState.update { it.copy(error = null) }
             is RuntimeIntent.RunCommand -> runCommand(intent.command)
         }
+    }
+
+    private fun refreshStorage() {
+        _uiState.update { it.copy(storageGranted = container.hasStorageAccess()) }
     }
 
     /** 把仓库状态合并进 UI 状态（UI 侧字段如 lastOutput 不受影响） */

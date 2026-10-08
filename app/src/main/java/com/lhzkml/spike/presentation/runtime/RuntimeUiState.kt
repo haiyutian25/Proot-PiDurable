@@ -25,6 +25,14 @@ data class RuntimeUiState(
 
     val rootfsSha256: String? = null,
 
+    /**
+     * 共享存储是否已授权。
+     *
+     * 决定 guest 内能否看到 `/sdcard` —— 未授权时 [ProotBinds.storage] 不产生绑定，
+     * 所以这里的状态直接影响 guest 的可用性，需要在界面上可见、可操作。
+     */
+    val storageGranted: Boolean = false,
+
     /** 最近一次命令执行输出（诊断用） */
     val lastCommand: String? = null,
     val lastOutput: String? = null,

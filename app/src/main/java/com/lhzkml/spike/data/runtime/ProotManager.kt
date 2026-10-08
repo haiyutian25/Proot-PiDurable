@@ -26,6 +26,8 @@ import java.util.concurrent.TimeUnit
  *  · `-L`（修正 lstat，消除 dpkg 的符号链接告警）
  *  · `/dev/urandom → /dev/random`、`/dev/fd`、`/dev/std*`、`/dev/shm` 等绑定
  *    （Android 的 /dev 与常规 Linux 差异较大）
+ *  · Android 域路径绑定（见 [ProotBinds]）：共享存储 `/sdcard`、
+ *    系统路径 `/apex` `/system` `/vendor` `/linkerconfig`、Dalvik 缓存
  *
  * **未默认启用**：`--kernel-release=…`（伪造内核版本）。proot-distro 把它放在
  * `if not minimal:` 分支，即仅非 minimal 模式才伪造；我们默认取"真实内核"这条路
@@ -108,6 +110,18 @@ class ProotManager(private val paths: RuntimePaths) {
         val fixLstat: Boolean = true,
         val devCompat: Boolean = true,
         val shareShm: Boolean = true,
+        /** 绑定共享存储（`/sdcard` 等）。需 app 已获存储权限，无权限时自动为空。 */
+        val storage: Boolean = true,
+        /** 绑定 Android 系统路径（`/apex`、`/system`、`/vendor`、linker 配置）。 */
+        val systemPaths: Boolean = true,
+        /** 绑定 Dalvik/ART 缓存目录。 */
+        val dalvikCache: Boolean = true,
+        /**
+         * 绑定伪造的 /proc 与 /proc/sys 条目（见 [SysDataStubs]）。
+         *
+         * 有意**不含 `/proc/version`** —— 那会与「uname -r 显示真机内核」矛盾。
+         */
+        val sysDataStubs: Boolean = true,
     ) {
         companion object {
             val DEFAULT = Options()
@@ -159,6 +173,15 @@ class ProotManager(private val paths: RuntimePaths) {
 
         // ---- 5. /dev/shm（Android 无此目录，用 app 私有目录顶上）----
         if (options.shareShm) add("--bind=${paths.shm.absolutePath}:/dev/shm")
+
+        // ---- 6. 伪造的 /proc 条目（对齐 proot-distro 的 fake_sysdata_bindings）----
+        // 放在 /dev /proc /sys 之后，覆盖生效；详见 SysDataStubs 的说明。
+        if (options.sysDataStubs) addAll(SysDataStubs.bindArgs(paths.sysdata))
+
+        // ---- 7. Android 域路径（对齐 proot-distro 的 non-minimal 绑定集合）----
+        if (options.storage) addAll(ProotBinds.storage())
+        if (options.systemPaths) addAll(ProotBinds.system)
+        if (options.dalvikCache) addAll(ProotBinds.dalvikCache)
 
         add("-w"); add(workDir)
         addAll(guestCmd)
