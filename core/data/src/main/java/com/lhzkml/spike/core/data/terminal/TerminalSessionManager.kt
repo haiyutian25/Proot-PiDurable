@@ -9,6 +9,10 @@ import com.lhzkml.spike.core.domain.model.Distro
 import com.lhzkml.spike.core.domain.repository.LogRepository
 import com.lhzkml.spike.core.terminal.emulator.TerminalSession
 import com.lhzkml.spike.core.terminal.emulator.TerminalSessionClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -34,6 +38,9 @@ class TerminalSessionManager(
     }
 
     private val main = Handler(Looper.getMainLooper())
+
+    /** 后台修补用的作用域：时区脚本是 suspend，但不能阻塞会话启动。 */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
     private var session: TerminalSession? = null
@@ -88,10 +95,15 @@ class TerminalSessionManager(
         // 否则 guest 内会看到一个进得去、却什么都没有的 /sdcard。
         proot.ensureSandboxIsolation(root)
 
-        // 每次启动都幂等补齐 locale（已就绪时只做两次 isDirectory 判断）。
-        // 放在这里而不是只在安装时做，是为了让「修 bug 之前装好的 rootfs」也能恢复 ——
-        // 详见 GuestFixup.ensureLocale 的说明。
+        // locale 在宿主侧幂等补齐（几次文件读写而已）。
         fixup?.ensureLocale(root)
+
+        // 时区改由 **guest 内脚本**设置（Alpine 需要 apk add tzdata），它是 suspend，
+        // 因此放后台跑、不阻塞会话启动。脚本内部会先比对 /etc/timezone，一致就直接返回，
+        // 所以"每次启动都试一次"很廉价 —— 同时保住"跟随 Android 系统时区变更"这个性质。
+        fixup?.let { fx ->
+            scope.launch { runCatching { fx.ensureTimezoneInGuest(root) } }
+        }
 
         // guest 内工作目录：优先 /root，缺失则退回 /
         val guestCwd = if (File(root, "root").isDirectory) "/root" else "/"

@@ -6,7 +6,12 @@
  * Security notes:
  *  - The child is a direct execve() of the proot binary living in the app's
  *    private storage; no shell interpolation happens in native code.
- *  - File descriptors are never leaked to the child beyond stdio.
+ *  - Only stdio reaches the child. This file used to *claim* that while doing
+ *    nothing to enforce it: only the pty fds were closed, so every descriptor
+ *    the app had open was inherited by proot and then by the guest, showing up
+ *    inside the sandbox as /proc/self/fd/N. Sandbox testing confirmed it —
+ *    an open base.apk was readable that way, i.e. a file proot's path
+ *    translation otherwise denies. close_inherited_fds() now enforces it.
  *  - No device files are opened; strictly the PTY master allocated by the OS.
  */
 #include <jni.h>
@@ -42,6 +47,36 @@ static int write_all(int fd, const void *buf, size_t len) {
         left -= (size_t) n;
     }
     return 0;
+}
+
+/*
+ * Close every descriptor the app happened to have open when we forked.
+ *
+ * The child is a plain execve() of the proot binary; anything left open is
+ * inherited straight through into the guest, where it appears as
+ * /proc/self/fd/N. Security testing of the sandbox showed the app's own fds
+ * (including an open base.apk) were reachable that way — which lets the
+ * sandbox read a file that proot's path translation otherwise denies, so
+ * "the sandbox cannot reach outside the rootfs" stops being true.
+ *
+ * Only close() is used: it is async-signal-safe, so a plain counting loop is
+ * the right tool after fork() in a multi-threaded process. opendir/readdir or
+ * anything else that allocates could deadlock on a lock another thread held at
+ * the moment of the fork.
+ *
+ * The bound is clamped because _SC_OPEN_MAX can be astronomically large, while
+ * a phone app's highest descriptor is realistically in the low hundreds. The
+ * clamp therefore only guards against a pathological limit; the cost is that
+ * many close() calls (tens of milliseconds at worst), once per session.
+ */
+#define CLOSE_FDS_FALLBACK_LIMIT 1024
+#define CLOSE_FDS_SCAN_LIMIT 65536
+
+static void close_inherited_fds(void) {
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    if (maxfd < 0) maxfd = CLOSE_FDS_FALLBACK_LIMIT;
+    if (maxfd > CLOSE_FDS_SCAN_LIMIT) maxfd = CLOSE_FDS_SCAN_LIMIT;
+    for (int fd = 3; fd < (int) maxfd; fd++) close(fd);
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
@@ -142,6 +177,10 @@ Java_com_lhzkml_spike_core_terminal_emulator_NativePty_create(
         dup2(slave, 1);
         dup2(slave, 2);
         if (slave > 2) close(slave);
+
+        // Drop everything else the app had open. Must come *after* the dup2()
+        // above: closing first would throw away the pty itself.
+        close_inherited_fds();
 
         if (cwd_copy != NULL && cwd_copy[0] != '\0') {
             chdir(cwd_copy);

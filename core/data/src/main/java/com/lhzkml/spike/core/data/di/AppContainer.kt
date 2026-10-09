@@ -55,8 +55,9 @@ class AppContainer(context: Context) {
 
     private val prootManager = ProotManager(
         paths = paths,
-        // 沙盒边界：未授权时完全不绑定外部存储（guest 内连路径都不存在）。
-        // 用 lambda 而不是快照值 —— 用户可能随时授权，每次构造 argv 都要按当时状态判定。
+        // 沙盒边界：没拿到完整（可写）访问时完全不绑定外部存储（guest 内连路径都不存在）。
+        // 用 lambda 而不是快照值 —— 用户可能随时授权，每次构造 argv 都要按当时状态判定；
+        // 权限变更时系统会重新挂载已有进程的命名空间，所以这里能立刻反映新状态。
         storageGranted = { StorageAccess.hasAccess(appContext) },
     ).also { mark("ProotManager") }
 
@@ -68,6 +69,8 @@ class AppContainer(context: Context) {
     private val guestFixup = GuestFixup(
         dns = GuestFixup.AndroidDnsProvider(appContext),
         logs = logs,
+        // 时区等调整要在 guest 内跑脚本（Alpine 需要 apk add tzdata），因此需要 ProotManager
+        proot = prootManager,
     ).also { mark("GuestFixup") }
 
     private val rootFsManager = RootFsManager(

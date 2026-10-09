@@ -156,6 +156,17 @@ class RootFsManager(
                     .onFailure { logs.warn(TAG, "fixup 失败（不影响可用性）：${it.message}") }
             }
 
+            // ---- 4.6 在 guest 内执行收尾脚本 ----
+            // 对齐 Kai 的做法：安装完成后进沙盒跑命令，而不是只在宿主侧改文件。
+            // 时区这类"需要发行版自身能力"的调整必须这么做 —— Alpine 得先 apk add tzdata，
+            // 宿主侧写文件对它是无效的（见 GuestFixup.setupScript 的说明）。
+            fixup?.let { fx ->
+                progress.onStage("setup", "在 guest 内执行收尾脚本")
+                runCatching { fx.ensureTimezoneInGuest(root, force = true) }
+                    .onSuccess { ok -> logs.info(TAG, "guest 收尾脚本：${if (ok) "完成" else "未完全生效"}") }
+                    .onFailure { logs.warn(TAG, "guest 收尾脚本失败（不影响可用性）：${it.message}") }
+            }
+
             // ---- 5. 完整性检查 ----
             progress.onStage("validate", "检查 rootfs 完整性")
             spec.requiredPaths.forEach { rel ->

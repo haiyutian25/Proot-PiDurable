@@ -9,12 +9,16 @@
 
     <!--
       共享存储（把 /sdcard 绑给 guest）。
-      ProotBinds.storage() 用 canRead() 判断，没授权就返回空，不会给出一个读不了的 /sdcard。
+      是否绑定由 StorageAccess.hasAccess() 决定（经 AppContainer.storageGranted 传入
+      ProotManager）：没拿到**完整**（可写）访问时一个都不绑，guest 内不会出现一个
+      半残的 /sdcard。
       本项目不考虑 Play 上架，因此直接申请「所有文件访问」以拿到完整可用的共享存储。
 
       分版本情况：
-        · API ≤ 28（本机测试机 Android 9）：READ/WRITE_EXTERNAL_STORAGE 运行时授权即可
-        · API 29：requestLegacyExternalStorage 生效
+        · API ≤ 28（本机测试机 Android 9）：READ + WRITE_EXTERNAL_STORAGE 都要运行时授权。
+          **只授 READ 会被系统挂成只读视图**（/storage/emulated 变成 gid=9997,mask=23），
+          guest 内表现为"能 ls、一写就 Permission denied" —— 见 StorageAccess.hasAccess。
+        · API 29：requestLegacyExternalStorage 生效，同上（WRITE 仍可授予）
         · API ≥ 30：需要 MANAGE_EXTERNAL_STORAGE，且必须引导用户去系统设置页开启
     -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />

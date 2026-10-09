@@ -4,6 +4,7 @@ import com.lhzkml.spike.core.domain.model.CommandResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 /**
@@ -101,6 +102,12 @@ class ProotManager(
             "TMPDIR" to "/tmp",
             "HOME" to "/root",
             "TERM" to "xterm-256color",
+            // 时区跟随 Android 系统设置（`persist.sys.timezone`，真机实测为 Asia/Shanghai）。
+            // glibc/musl 都优先读 TZ，并按这个名字去 /usr/share/zoneinfo 找 zone 文件；
+            // 每次构造 env 都重新取值，所以用户在系统里改了时区，新会话就跟着变。
+            // 落盘部分（/etc/timezone、/etc/localtime）由 [GuestFixup.ensureTimezone] 负责 ——
+            // 两者互补：TZ 覆盖「优先看环境变量」的程序，文件覆盖「只读 /etc/localtime」的程序。
+            "TZ" to TimeZone.getDefault().id,
             // 必须是 en_US.UTF-8，**不能用 C.UTF-8**。
             //
             // Ubuntu 26.04 的 coreutils 换成了 uutils（Rust 实现），其 ls 按 locale
@@ -342,9 +349,14 @@ class ProotManager(
     companion object {
         const val DEFAULT_TIMEOUT_SEC = 120L
 
-        /** guest 内的 PATH —— 必须显式传入，否则 guest 内命令全部 not found */
+        /**
+         * guest 内的 PATH —— 必须显式传入，否则 guest 内命令全部 not found。
+         *
+         * 末尾原本还有 `/opt/node/bin`，那是 P0 阶段（把 Node 装在 `/opt/node`）的遗留，
+         * guest 内该目录并不存在。环境自检报告把这条列为「PATH 含死目录」，已移除。
+         */
         private const val GUEST_PATH =
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/node/bin"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
         /**
          * 伪造的内核标识，格式与 proot-distro 的 `--kernel-release` 一致：

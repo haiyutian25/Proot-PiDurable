@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import com.lhzkml.spike.core.domain.repository.LogRepository
 import java.io.File
+import java.util.TimeZone
 
 /**
  * rootfs 的准备与修补。四项各自独立、幂等，可安全重复调用。
@@ -12,6 +13,7 @@ import java.io.File
  *  · [writeResolvConf] / [writeHosts] —— 对齐 proot-distro 的 `helpers/rootfs.py`
  *  · [writeAptSandboxOff] —— Android 特有（app 无法 `setuid(_apt)`）
  *  · [ensureLocale] —— Android + uutils 特有（见该方法说明）
+ *  · [ensureTimezoneInGuest] —— Android 特有，**在 guest 内跑脚本**（见该方法说明）
  *
  * **为什么必须写 DNS**：Android 的 DNS 由 netd 管理，**宿主上根本没有 `/etc/resolv.conf`**
  * （实测确认）。而 guest 内的 glibc / musl 只会去读 `/etc/resolv.conf`，
@@ -25,6 +27,11 @@ import java.io.File
 class GuestFixup(
     private val dns: DnsProvider,
     private val logs: LogRepository,
+    /**
+     * 用于**在 guest 内执行收尾脚本**（时区等需要发行版自身能力的调整）。
+     * 为 null 时跳过脚本 —— 便于纯离线/测试场景。
+     */
+    private val proot: ProotManager? = null,
 ) {
 
     /**
@@ -38,6 +45,8 @@ class GuestFixup(
         writeHosts(rootfs)
         writeAptSandboxOff(rootfs)
         ensureLocale(rootfs)
+        // 时区改走「guest 内脚本」（Alpine 需要 apk add tzdata 才谈得上设时区），
+        // 它是 suspend 且可能联网，由安装流程单独 await 调用。
         return servers
     }
 
@@ -115,6 +124,136 @@ class GuestFixup(
             },
         )
     }
+
+    /**
+     * 让 guest 的时区跟随 **Android 系统设置** —— 做法是**在 guest 内跑一段脚本**
+     * （对齐 Kai：安装完成后在沙盒里执行命令，而不是只在宿主侧改文件）。
+     *
+     * **为什么必须进 guest 跑**：Alpine 的 minirootfs **不含 tzdata**
+     * （`/usr/share/zoneinfo` 整个不存在），宿主侧怎么写文件都没用 —— 只能在 guest 内
+     * 用它自己的包管理器（`apk add tzdata`）装上，才谈得上设时区。脚本见 [setupScript]。
+     *
+     * **取值来自系统而不是写死**：`TimeZone.getDefault().id` 就是 Android 的
+     * `persist.sys.timezone`（真机实测 `Asia/Shanghai`）。
+     *
+     * **什么时候跑**：
+     *  · 安装 rootfs 后必定跑一次（`force = true`，带进度）
+     *  · 每次终端启动时**只在真的不一致才跑** —— 先读 `/etc/timezone` 比一下，
+     *    一致就直接返回，不付 proot 起进程的代价。这样用户在系统设置里改了时区、
+     *    或跨时区旅行，新会话就自动跟上。
+     *
+     * 脚本还会把自身写到 guest 的 `/usr/local/bin/proot-pi-setup.sh`，所以你也可以在
+     * 终端里直接手动重跑：`sh /usr/local/bin/proot-pi-setup.sh`。
+     *
+     * 另有 `ProotManager.buildEnv()` 传的 `TZ` 环境变量，两者互补：TZ 覆盖「优先看环境
+     * 变量」的程序，文件覆盖「只读 /etc/localtime」的程序。
+     *
+     * @param force 为 true 时跳过"已一致"的快速判断，无条件执行脚本
+     * @return 是否已配置（或本来就已经正确）
+     */
+    suspend fun ensureTimezoneInGuest(rootfs: File, force: Boolean = false): Boolean {
+        val prootManager = proot
+        if (prootManager == null) {
+            logs.warn(TAG, "未注入 ProotManager，跳过 guest 收尾脚本")
+            return false
+        }
+
+        val zoneId = TimeZone.getDefault().id
+        if (!SAFE_ZONE_ID.matches(zoneId)) {
+            // `GMT+08:00` 这类名字没有对应的 zoneinfo 文件，且含 `:` 会破坏脚本结构
+            logs.warn(TAG, "时区标识不可用（$zoneId），跳过 guest 收尾脚本")
+            return false
+        }
+        if (!force && readZone(rootfs) == zoneId) return true
+
+        // 脚本落点必须是 rootfs 内的**真实**目录：rootfs 里的绝对符号链接
+        // （例如 `/usr/local -> /usr`）一旦被宿主的 File API 顺着解析，就会写穿到宿主系统上。
+        // canonicalPath 会解开符号链接，用它做归属校验 —— 与 Kai 的 safeChild 同一思路。
+        val target = File(rootfs, GUEST_SCRIPT_REL)
+        target.parentFile?.mkdirs()
+        val rootCanon = rootfs.canonicalPath
+        if (!target.canonicalPath.startsWith("$rootCanon/")) {
+            logs.warn(TAG, "收尾脚本落点解析到 rootfs 之外（${target.canonicalPath}），跳过")
+            return false
+        }
+        target.writeText(setupScript(zoneId))
+
+        val result = prootManager.execute(
+            guestCmd = listOf("/bin/sh", GUEST_SCRIPT_PATH),
+            rootfs = rootfs,
+            workDir = "/",
+            timeoutSec = GUEST_SETUP_TIMEOUT_SEC,
+        )
+        result.stdout.trim().lines().filter { it.isNotBlank() }.forEach { logs.info(TAG, it) }
+        if (result.stderr.isNotBlank()) {
+            logs.warn(TAG, "收尾脚本 stderr：${result.stderr.trim().take(300)}")
+        }
+
+        // 以落盘结果为准，而不是脚本的退出码 —— 与包管理那套判据一致。
+        val applied = readZone(rootfs)
+        if (applied != zoneId) {
+            logs.warn(TAG, "收尾脚本执行后 /etc/timezone=$applied，期望 $zoneId")
+            return false
+        }
+        logs.info(TAG, "时区已由 guest 脚本设为 $zoneId（脚本 exit=${result.exitCode}）")
+        return true
+    }
+
+    private fun readZone(rootfs: File): String? = runCatching {
+        File(rootfs, "etc/timezone").takeIf { it.isFile }?.readText()?.trim()
+    }.getOrNull()
+
+    /**
+     * guest 收尾脚本的内容。
+     *
+     * **刻意不使用任何 shell 变量展开 —— 通篇没有 `$`**：时区值由宿主直接写死进去，
+     * 于是这个 Kotlin 模板不需要任何转义（否则每处 shell 变量都得写成 `${'$'}`），
+     * 脚本本身也没有引号/展开陷阱。[zone] 已通过 [SAFE_ZONE_ID] 校验。
+     *
+     * 做成"脚本文件 + 在 guest 内执行"而不是把命令拼成一行，是为了让用户能随时
+     * `cat` / 手动重跑它，排障成本最低。
+     */
+    private fun setupScript(zone: String): String = """
+        |#!/bin/sh
+        |# proot-pi-setup —— 由 PRoot-Pi 在 rootfs 安装完成后、于 guest 内执行。
+        |# 可手动重跑：  sh /usr/local/bin/proot-pi-setup.sh
+        |#
+        |# 为什么放在 guest 内执行（而不是宿主直接改文件）：
+        |#   Alpine 的 minirootfs 不带 tzdata（没有 /usr/share/zoneinfo），
+        |#   只能在 guest 内用它自己的包管理器装上，才谈得上设时区。
+        |#
+        |# 时区值由宿主读 Android 的 persist.sys.timezone 后写死在下方；脚本内不做变量展开。
+        |set -u
+        |
+        |echo '[setup] 目标时区: $zone'
+        |
+        |# 1) 缺 zone 数据时按发行版补装（只有 Alpine 会走这条）
+        |if [ ! -f /usr/share/zoneinfo/$zone ]; then
+        |    if command -v apk >/dev/null 2>&1; then
+        |        echo '[setup] 缺少 tzdata，尝试 apk add tzdata'
+        |        apk add --no-cache tzdata >/dev/null 2>&1 || echo '[setup] tzdata 安装失败（可能需要网络）'
+        |    fi
+        |fi
+        |
+        |# 2) 仍然没有就明确放弃，不留半吊子配置（写个不存在的时区只会静默退回 UTC）
+        |if [ ! -f /usr/share/zoneinfo/$zone ]; then
+        |    echo '[setup] 缺少 /usr/share/zoneinfo/$zone，未设置时区'
+        |    exit 0
+        |fi
+        |
+        |# 3) 发行版自带的工具优先（Alpine 的 busybox setup-timezone）
+        |if command -v setup-timezone >/dev/null 2>&1; then
+        |    setup-timezone -z $zone >/dev/null 2>&1 || true
+        |fi
+        |
+        |# 4) 兜底落盘：Debian/Ubuntu 的时区就是这两个文件；幂等
+        |printf '$zone\n' > /etc/timezone
+        |ln -sfn /usr/share/zoneinfo/$zone /etc/localtime
+        |
+        |echo '[setup] 时区已设为 $zone，当前时间：'
+        |date
+        |exit 0
+    """.trimMargin()
 
     /**
      * 把复制出来的目录树放开到「所有人可读」（目录另加可执行，否则无法遍历）。
@@ -254,6 +393,21 @@ class GuestFixup(
 
         /** 可作复制来源的已编译 UTF-8 locale（按顺序取第一个存在的）。 */
         private val UTF8_LOCALE_SOURCES = listOf("C.utf8", "C.UTF-8")
+
+        /** guest 收尾脚本在 rootfs 内的落点（同样硬编码进脚本，供用户手动重跑）。 */
+        private const val GUEST_SCRIPT_REL = "usr/local/bin/proot-pi-setup.sh"
+        private const val GUEST_SCRIPT_PATH = "/usr/local/bin/proot-pi-setup.sh"
+
+        /** 收尾脚本超时：可能要 `apk add tzdata`（联网装包）。 */
+        private const val GUEST_SETUP_TIMEOUT_SEC = 300L
+
+        /**
+         * 可安全写进脚本的时区标识。
+         *
+         * 排除 `:` —— `GMT+08:00` 这类名字没有对应的 zoneinfo 文件（设了也是白设），
+         * 且冒号会破坏脚本结构。真机实测正常情况下是 `Asia/Shanghai`。
+         */
+        private val SAFE_ZONE_ID = Regex("^[A-Za-z0-9_+/-]{1,64}$")
 
         /**
          * 关闭 apt sandbox 的配置文件。
