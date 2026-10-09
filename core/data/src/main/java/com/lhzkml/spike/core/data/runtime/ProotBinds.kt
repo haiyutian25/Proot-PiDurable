@@ -60,6 +60,31 @@ object ProotBinds {
     }
 
     /**
+     * 遮蔽 Android 的 IPC 设备节点：`/dev/binder`、`/dev/hwbinder`、`/dev/vndbinder`。
+     *
+     * **为什么要遮**：沙盒进程与宿主 App 同 uid、同 SELinux 域，能打开这些节点就等于
+     * **以 App 的身份与系统服务通信** —— 拿不到超出 app 的权限（不是提权），但"沙盒里的
+     * 代码能代 App 说话"本身就不该留着；而且将来若给 app 加了敏感权限（定位、联系人、
+     * 通知读取…），沙盒会顺着 binder 一并继承。
+     *
+     * 真机实测（未遮蔽时，guest 内 `ls -l`）：`/dev/binder` = `10, 55`、`/dev/hwbinder`
+     * = `10, 54`（真实设备号，可打开），`/dev/vndbinder` 已经是 `Permission denied`。
+     *
+     * **怎么遮**：proot 的 `-b` 是**后绑覆盖先绑**（本项目 `SysDataStubs` 的伪造 /proc
+     * 条目就依赖这条语义），所以在 `-b /dev` 之后把节点指向 `/dev/null` 即可。遮蔽后
+     * guest 内看到的设备号变成 `1, 3`，`open` 拿到的只是空设备，任何 binder ioctl 必然
+     * `ENOTTY` —— 对任何 binder 使用者等价于设备不可用。
+     *
+     * 为什么不改成"白名单逐个绑设备节点"：那会牵动 /dev 的整体绑定方式，各类程序对
+     * /dev 的依赖很杂、破坏面大；而它并不改变信任边界（其余节点本来就被 SELinux 与
+     * 文件权限挡在 app uid 之外）。
+     *
+     * 只遮蔽真机上**存在**的节点 —— proot 对不存在的 bind 源会直接报错。
+     */
+    fun maskAndroidIpcDevices(): List<String> =
+        ANDROID_IPC_DEVICES.filter { File(it).exists() }.map { "--bind=/dev/null:$it" }
+
+    /**
      * Android 系统路径：`/apex`、`/system`、`/vendor` 及 linker 配置。
      *
      * 对齐 `bindings.py::system_bindings()`。部分程序（尤其是动态链接器与
@@ -114,6 +139,9 @@ object ProotBinds {
             if (dir.list()?.isEmpty() == true) runCatching { dir.delete() }
         }
     }
+
+    /** Android 的 binder 家族设备节点（真机上存在的才会被遮蔽）。 */
+    private val ANDROID_IPC_DEVICES = listOf("/dev/binder", "/dev/hwbinder", "/dev/vndbinder")
 
     private val STORAGE_STUBS = listOf(
         "sdcard", "storage", "mnt/sdcard", "mnt/runtime",

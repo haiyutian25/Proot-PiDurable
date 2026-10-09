@@ -170,6 +170,11 @@ class ProotManager(
         /** 绑定 Dalvik/ART 缓存目录。 */
         val dalvikCache: Boolean = true,
         /**
+         * 遮蔽 Android IPC 设备节点（`/dev/binder` 等），使 guest 不能"以 App 身份"
+         * 与系统服务通信。见 [ProotBinds.maskAndroidIpcDevices]。
+         */
+        val maskAndroidIpc: Boolean = true,
+        /**
          * 绑定伪造的 /proc 与 /proc/sys 条目（见 [SysDataStubs]）。
          *
          * 有意**不含 `/proc/version`** —— 那会与「uname -r 显示真机内核」矛盾。
@@ -223,6 +228,11 @@ class ProotManager(
                 }
             }
         }
+
+        // ---- 4.1 遮蔽 Android IPC 设备节点（binder 家族）----
+        // 必须在 `-b /dev` **之后**：proot 的 -b 是后绑覆盖先绑（同 /proc 伪造条目的道理）。
+        // 详见 ProotBinds.maskAndroidIpcDevices 的说明。
+        if (options.maskAndroidIpc) addAll(ProotBinds.maskAndroidIpcDevices())
 
         // ---- 5. /dev/shm（Android 无此目录，用 app 私有目录顶上）----
         if (options.shareShm) add("--bind=${paths.shm.absolutePath}:/dev/shm")
