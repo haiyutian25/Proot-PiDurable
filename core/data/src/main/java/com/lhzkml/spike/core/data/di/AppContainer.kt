@@ -25,6 +25,7 @@ import com.lhzkml.spike.core.domain.usecase.RestartRuntimeUseCase
 import com.lhzkml.spike.core.domain.usecase.SelectDistroUseCase
 import com.lhzkml.spike.core.domain.usecase.StartRuntimeUseCase
 import com.lhzkml.spike.core.domain.usecase.StopRuntimeUseCase
+import com.lhzkml.spike.core.terminal.emulator.NativePty
 
 /**
  * 依赖装配（手工 DI）。
@@ -45,6 +46,23 @@ class AppContainer(context: Context) {
 
     private fun mark(label: String) {
         Log.i(TAG, "  $label @${SystemClock.elapsedRealtime() - t0}ms")
+    }
+
+    // ---- 进程加固：必须早于任何子进程 ----
+    //
+    // 沙盒与宿主 App 同 uid、同 SELinux 域，内核的 ptrace 规则会把两者当"自己人"：
+    // 沙盒内进程可以直接读宿主的 /proc/<pid>/fd/N（例如 base.apk 的句柄）、maps、
+    // environ，并对内存做 process_vm_readv / PTRACE_ATTACH —— 等于绕过 proot 的路径
+    // 翻译读到 rootfs 之外。置 PR_SET_DUMPABLE=0 后，同 uid 且无 CAP_SYS_PTRACE 的
+    // 进程访问这些节点一律被拒（真机对照实测：fd/maps/environ 由"可读"变为"被拒"）。
+    //
+    // 两点约束：① 必须在**宿主进程**里设 —— 沙盒内设会被 proot 伪造；② 必须早于任何
+    // spawn，所以放在属性初始化最前面（Kotlin 按声明顺序执行）。
+    // 局限：只保护 app 进程自身；沙盒内同 uid 的进程彼此仍互读（那是本架构的固有限制）。
+    init {
+        val hardened = NativePty.isAvailable() &&
+            runCatching { NativePty.disableDumping() }.getOrDefault(false)
+        Log.i(TAG, "  process hardened (dumpable=0): $hardened")
     }
 
     // ---- data 层基础设施 ----

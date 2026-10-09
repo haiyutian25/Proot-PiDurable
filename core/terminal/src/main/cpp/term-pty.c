@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <android/log.h>
@@ -77,6 +78,56 @@ static void close_inherited_fds(void) {
     if (maxfd < 0) maxfd = CLOSE_FDS_FALLBACK_LIMIT;
     if (maxfd > CLOSE_FDS_SCAN_LIMIT) maxfd = CLOSE_FDS_SCAN_LIMIT;
     for (int fd = 3; fd < (int) maxfd; fd++) close(fd);
+}
+
+/*
+ * disableDumping() -> boolean
+ *
+ * Clear this process's dumpable flag (PR_SET_DUMPABLE = 0).
+ *
+ * The sandbox and the host app run as the *same* uid and the *same* SELinux
+ * domain, so the kernel's ptrace rules treat them as one party: a process
+ * inside the sandbox can read the host's /proc/<pid>/fd/N (e.g. an open
+ * base.apk), /proc/<pid>/maps and /proc/<pid>/environ, and can use
+ * process_vm_readv / PTRACE_ATTACH on it. That reaches files outside the
+ * rootfs, bypassing proot's path translation entirely.
+ *
+ * With dumpable=0, a same-uid process without CAP_SYS_PTRACE is refused on all
+ * of those nodes (kernel check: ptrace_may_access). Measured on device with a
+ * victim/attacker pair that had the app's uid and supplementary groups, the
+ * app's mount namespace, and no capabilities:
+ *
+ *   dumpable=1 : readdir /proc/<pid>/fd ok, readlink/read of fd/N ok (ELF
+ *                header read back), maps and environ readable
+ *   dumpable=0 : every one of the above denied
+ *
+ * It has to be set in the *host app process* (i.e. at this function's call
+ * site) — setting it from inside the sandbox is faked by proot (the call
+ * returns 0 while PR_GET_DUMPABLE still reads 1).
+ *
+ * Scope: this protects the app process only. Same-uid processes *inside* the
+ * sandbox can still read each other (that is where an AI CLI's keys live);
+ * fixing that needs a different uid/SELinux domain, i.e. two APKs, which
+ * conflicts with this project's single-APK goal.
+ *
+ * Side effect: debuggers can no longer attach to this process (run-as, ddms).
+ * logcat and crash tombstones are unaffected (debuggerd runs as root).
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_disableDumping(
+        JNIEnv *env, jclass clazz) {
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+        LOGW("prctl(PR_SET_DUMPABLE, 0) failed: %s", strerror(errno));
+        return JNI_FALSE;
+    }
+    // Read back: other components (or a later exec) may reset it, so report the
+    // actual state rather than assuming the call took effect.
+    int now = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+    if (now != 0) {
+        LOGW("dumpable is still %d after PR_SET_DUMPABLE", now);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {

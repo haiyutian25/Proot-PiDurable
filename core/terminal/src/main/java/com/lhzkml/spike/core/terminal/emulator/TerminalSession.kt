@@ -42,7 +42,7 @@ object NativePty {
     //
     // 注意：JNI 是按「符号名」解析 native 方法的，符号名由类名编码而来
     // （`Java_` + 包名点换下划线 + `_类名_方法名`）。所以**改动本类的包名或类名时，
-    // 必须同步改 term-pty.c 里的 8 个符号**，否则运行时才会暴露为
+    // 必须同步改 term-pty.c 里的 9 个符号**，否则运行时才会暴露为
     // 「No implementation found for ...」——编译期不会报任何错。
     external fun create(cmd: Array<String>, env: Array<String>, cwd: String, rows: Int, cols: Int): IntArray?
     external fun setSize(fd: Int, rows: Int, cols: Int)
@@ -52,6 +52,22 @@ object NativePty {
     external fun closeFd(fd: Int)
     external fun readBytes(fd: Int, buf: ByteArray, off: Int, len: Int): Int
     external fun writeBytes(fd: Int, data: ByteArray): Int
+
+    /**
+     * 关掉本进程的可 dump 标记（`PR_SET_DUMPABLE = 0`）。
+     *
+     * 与 PTY 无关，只是借这个已加载的 native 库做一次进程加固 —— **必须在宿主 App
+     * 进程、且在产生任何子进程之前调用**（沙盒内调用会被 proot 伪造）。
+     *
+     * 起因：沙盒与宿主 App 同 uid、同 SELinux 域，内核 ptrace 规则把两者当"自己人"，
+     * 于是沙盒内进程能读宿主的 `/proc/<pid>/fd/N`（例如 base.apk 句柄）、`maps`、
+     * `environ`，并对内存做 `process_vm_readv`/`PTRACE_ATTACH` —— 绕过 proot 的路径
+     * 翻译读到 rootfs 之外。置 0 后这些访问一律被内核拒绝（真机对照实测见
+     * term-pty.c 中该函数的注释）。
+     *
+     * @return 是否确认生效（回读 `PR_GET_DUMPABLE` 为 0）；失败只影响加固，不影响功能
+     */
+    external fun disableDumping(): Boolean
 }
 
 interface TerminalSessionClient {
