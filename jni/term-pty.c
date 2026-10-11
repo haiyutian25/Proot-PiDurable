@@ -1,0 +1,345 @@
+/*
+ * PRoot-Pi native PTY bridge (ported from PRoot-Pi, Apache-2.0).
+ * Native PTY bridge: creates a real pseudo-terminal for the Debian userspace
+ * session (proot child), performs window-size ioctls and signal delivery.
+ *
+ * Security notes:
+ *  - The child is a direct execve() of the proot binary living in the app's
+ *    private storage; no shell interpolation happens in native code.
+ *  - Only stdio reaches the child. This file used to *claim* that while doing
+ *    nothing to enforce it: only the pty fds were closed, so every descriptor
+ *    the app had open was inherited by proot and then by the guest, showing up
+ *    inside the sandbox as /proc/self/fd/N. Sandbox testing confirmed it —
+ *    an open base.apk was readable that way, i.e. a file proot's path
+ *    translation otherwise denies. close_inherited_fds() now enforces it.
+ *  - No device files are opened; strictly the PTY master allocated by the OS.
+ */
+#include <jni.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <android/log.h>
+
+#define TAG "term-pty"
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+
+static jclass g_illegal_state;
+
+static int g_master_fd = -1;
+static pid_t g_child_pid = -1;
+
+static int write_all(int fd, const void *buf, size_t len) {
+    const char *p = (const char *) buf;
+    size_t left = len;
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += n;
+        left -= (size_t) n;
+    }
+    return 0;
+}
+
+/*
+ * Close every descriptor the app happened to have open when we forked.
+ *
+ * The child is a plain execve() of the proot binary; anything left open is
+ * inherited straight through into the guest, where it appears as
+ * /proc/self/fd/N. Security testing of the sandbox showed the app's own fds
+ * (including an open base.apk) were reachable that way — which lets the
+ * sandbox read a file that proot's path translation otherwise denies, so
+ * "the sandbox cannot reach outside the rootfs" stops being true.
+ *
+ * Only close() is used: it is async-signal-safe, so a plain counting loop is
+ * the right tool after fork() in a multi-threaded process. opendir/readdir or
+ * anything else that allocates could deadlock on a lock another thread held at
+ * the moment of the fork.
+ *
+ * The bound is clamped because _SC_OPEN_MAX can be astronomically large, while
+ * a phone app's highest descriptor is realistically in the low hundreds. The
+ * clamp therefore only guards against a pathological limit; the cost is that
+ * many close() calls (tens of milliseconds at worst), once per session.
+ */
+#define CLOSE_FDS_FALLBACK_LIMIT 1024
+#define CLOSE_FDS_SCAN_LIMIT 65536
+
+static void close_inherited_fds(void) {
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    if (maxfd < 0) maxfd = CLOSE_FDS_FALLBACK_LIMIT;
+    if (maxfd > CLOSE_FDS_SCAN_LIMIT) maxfd = CLOSE_FDS_SCAN_LIMIT;
+    for (int fd = 3; fd < (int) maxfd; fd++) close(fd);
+}
+
+/*
+ * disableDumping() -> boolean
+ *
+ * Clear this process's dumpable flag (PR_SET_DUMPABLE = 0).
+ *
+ * The sandbox and the host app run as the *same* uid and the *same* SELinux
+ * domain, so the kernel's ptrace rules treat them as one party: a process
+ * inside the sandbox can read the host's /proc/<pid>/fd/N (e.g. an open
+ * base.apk), /proc/<pid>/maps and /proc/<pid>/environ, and can use
+ * process_vm_readv / PTRACE_ATTACH on it. That reaches files outside the
+ * rootfs, bypassing proot's path translation entirely.
+ *
+ * With dumpable=0, a same-uid process without CAP_SYS_PTRACE is refused on all
+ * of those nodes (kernel check: ptrace_may_access). Measured on device with a
+ * victim/attacker pair that had the app's uid and supplementary groups, the
+ * app's mount namespace, and no capabilities:
+ *
+ *   dumpable=1 : readdir /proc/<pid>/fd ok, readlink/read of fd/N ok (ELF
+ *                header read back), maps and environ readable
+ *   dumpable=0 : every one of the above denied
+ *
+ * It has to be set in the *host app process* (i.e. at this function's call
+ * site) — setting it from inside the sandbox is faked by proot (the call
+ * returns 0 while PR_GET_DUMPABLE still reads 1).
+ *
+ * Scope: this protects the app process only. Same-uid processes *inside* the
+ * sandbox can still read each other (that is where an AI CLI's keys live);
+ * fixing that needs a different uid/SELinux domain, i.e. two APKs, which
+ * conflicts with this project's single-APK goal.
+ *
+ * Side effect: debuggers can no longer attach to this process (run-as, ddms).
+ * logcat and crash tombstones are unaffected (debuggerd runs as root).
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_disableDumping(
+        JNIEnv *env, jclass clazz) {
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+        LOGW("prctl(PR_SET_DUMPABLE, 0) failed: %s", strerror(errno));
+        return JNI_FALSE;
+    }
+    // Read back: other components (or a later exec) may reset it, so report the
+    // actual state rather than assuming the call took effect.
+    int now = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
+    if (now != 0) {
+        LOGW("dumpable is still %d after PR_SET_DUMPABLE", now);
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    JNIEnv *env;
+    if ((*vm)->GetEnv(vm, (void **) &env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+    jclass cls = (*env)->FindClass(env, "java/lang/IllegalStateException");
+    if (cls == NULL) return JNI_ERR;
+    g_illegal_state = (jclass) (*env)->NewGlobalRef(env, cls);
+    return JNI_VERSION_1_6;
+}
+
+/*
+ * create(cmd, env, cwd, rows, cols) -> int[2]{pid, masterFd} or NULL
+ * cmd/env are argv/envp arrays (no shell); child becomes session leader with
+ * the pty as its controlling terminal.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_create(
+        JNIEnv *env, jclass clazz,
+        jobjectArray cmd, jobjectArray envArr, jstring cwd,
+        jint rows, jint cols) {
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) { LOGW("posix_openpt failed: %s", strerror(errno)); return NULL; }
+    if (grantpt(master) < 0 || unlockpt(master) < 0) {
+        LOGW("grantpt/unlockpt failed: %s", strerror(errno));
+        close(master);
+        return NULL;
+    }
+
+    const char *cwd_utf = (*env)->GetStringUTFChars(env, cwd, NULL);
+    if (cwd_utf == NULL) { close(master); return NULL; }
+    char *cwd_copy = strdup(cwd_utf);
+    (*env)->ReleaseStringUTFChars(env, cwd, cwd_utf);
+
+    int argc = (*env)->GetArrayLength(env, cmd);
+    int envc = (*env)->GetArrayLength(env, envArr);
+
+    // Build argv/envp before forking (JNI in child after fork is unsafe).
+    char **argv = calloc((size_t) argc + 1, sizeof(char *));
+    char **envp = calloc((size_t) envc + 1, sizeof(char *));
+    int i;
+    for (i = 0; i < argc; i++) {
+        jstring s = (jstring) (*env)->GetObjectArrayElement(env, cmd, i);
+        const char *utf = (*env)->GetStringUTFChars(env, s, NULL);
+        argv[i] = strdup(utf);
+        (*env)->ReleaseStringUTFChars(env, s, utf);
+        (*env)->DeleteLocalRef(env, s);
+    }
+    for (i = 0; i < envc; i++) {
+        jstring s = (jstring) (*env)->GetObjectArrayElement(env, envArr, i);
+        const char *utf = (*env)->GetStringUTFChars(env, s, NULL);
+        envp[i] = strdup(utf);
+        (*env)->ReleaseStringUTFChars(env, s, utf);
+        (*env)->DeleteLocalRef(env, s);
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOGW("fork failed: %s", strerror(errno));
+        for (i = 0; i < argc; i++) free(argv[i]);
+        for (i = 0; i < envc; i++) free(envp[i]);
+        free(argv);
+        free(envp);
+        free(cwd_copy);
+        close(master);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        // ---- child ----
+        // Resolve the slave path BEFORE closing the master: ptsname_r()
+        // requires a valid master fd.
+        char slave_path[128];
+        if (ptsname_r(master, slave_path, sizeof(slave_path)) != 0) _exit(127);
+        setsid();
+        int slave = open(slave_path, O_RDWR | O_NOCTTY);
+        if (slave < 0) _exit(127);
+        close(master);
+        // Session leader without a controlling terminal: acquire it explicitly.
+        ioctl(slave, TIOCSCTTY, NULL);
+
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.ws_row = (unsigned short) (rows > 0 ? rows : 24);
+        ws.ws_col = (unsigned short) (cols > 0 ? cols : 80);
+        ioctl(slave, TIOCSWINSZ, &ws);
+
+        struct termios tio;
+        if (tcgetattr(slave, &tio) == 0) {
+            tio.c_iflag |= ICRNL | IXON;
+            tio.c_oflag |= OPOST | ONLCR;
+            tio.c_lflag |= ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN;
+            tcsetattr(slave, TCSANOW, &tio);
+        }
+
+        dup2(slave, 0);
+        dup2(slave, 1);
+        dup2(slave, 2);
+        if (slave > 2) close(slave);
+
+        // Drop everything else the app had open. Must come *after* the dup2()
+        // above: closing first would throw away the pty itself.
+        close_inherited_fds();
+
+        if (cwd_copy != NULL && cwd_copy[0] != '\0') {
+            chdir(cwd_copy);
+        }
+
+        // Restore default signal dispositions (Android Zygote masks/ignores some)
+        signal(SIGPIPE, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+        setenv("TMPDIR", "/tmp", 0);
+
+        execve(argv[0], argv, envp);
+        const char *err = strerror(errno);
+        write_all(2, "\r\n[term-pty] execve failed: ", 28);
+        if (argv[0]) write_all(2, argv[0], strlen(argv[0]));
+        write_all(2, " (", 2);
+        write_all(2, err, strlen(err));
+        write_all(2, ")\r\n", 3);
+        _exit(127); // execve failed
+    }
+
+    // ---- parent ----
+    for (i = 0; i < argc; i++) free(argv[i]);
+    for (i = 0; i < envc; i++) free(envp[i]);
+    free(argv);
+    free(envp);
+    free(cwd_copy);
+
+    g_master_fd = master;
+    g_child_pid = pid;
+
+    // Return a 1D jintArray {pid, masterFd} matching NativePty.create(...): IntArray?
+    jintArray result = (*env)->NewIntArray(env, 2);
+    if (result == NULL) {
+        close(master);
+        return NULL;
+    }
+    jint out[2];
+    out[0] = (jint) pid;
+    out[1] = (jint) master;
+    (*env)->SetIntArrayRegion(env, result, 0, 2, out);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_setSize(
+        JNIEnv *env, jclass clazz, jint fd, jint rows, jint cols) {
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = (unsigned short) (rows > 0 ? rows : 24);
+    ws.ws_col = (unsigned short) (cols > 0 ? cols : 80);
+    ioctl(fd, TIOCSWINSZ, &ws);
+    // Deliver SIGWINCH indirectly: TIOCSWINSZ signals the foreground pg.
+}
+
+JNIEXPORT jint JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_waitFor(
+        JNIEnv *env, jclass clazz, jint pid) {
+    int status = 0;
+    if (waitpid((pid_t) pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
+JNIEXPORT void JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_sendSignal(
+        JNIEnv *env, jclass clazz, jint pid, jint signal) {
+    kill((pid_t) pid, (int) signal);
+}
+
+/* Ask the foreground interactive shell/readline to redisplay after output
+ * from a background job arrived while its prompt was accepting input. */
+JNIEXPORT void JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_requestRedraw(
+        JNIEnv *env, jclass clazz, jint pid, jint master_fd) {
+    pid_t foreground = tcgetpgrp((int) master_fd);
+    if (foreground > 0) {
+        kill(-foreground, SIGWINCH);
+    } else if (pid > 0) {
+        kill((pid_t) pid, SIGWINCH);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_closeFd(
+        JNIEnv *env, jclass clazz, jint fd) {
+    close((int) fd);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_readBytes(
+        JNIEnv *env, jclass clazz, jint fd, jbyteArray buf, jint off, jint len) {
+    jbyte *cbuf = (*env)->GetByteArrayElements(env, buf, NULL);
+    ssize_t n = read((int) fd, cbuf + off, (size_t) len);
+    (*env)->ReleaseByteArrayElements(env, buf, cbuf, 0);
+    if (n < 0 && errno == EINTR) return 0;
+    return (jint) n;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_lhzkml_spike_core_terminal_emulator_NativePty_writeBytes(
+        JNIEnv *env, jclass clazz, jint fd, jbyteArray data) {
+    jsize len = (*env)->GetArrayLength(env, data);
+    jbyte *cbuf = (*env)->GetByteArrayElements(env, data, NULL);
+    int rc = write_all((int) fd, cbuf, (size_t) len);
+    (*env)->ReleaseByteArrayElements(env, data, cbuf, JNI_ABORT);
+    return rc == 0 ? len : -1;
+}
